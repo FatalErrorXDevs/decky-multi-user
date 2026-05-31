@@ -252,10 +252,11 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
   const [isSwitching, setIsSwitching] = useState<boolean>(false);
 
   useEffect(() => {
+    const controller = new AbortController();
+    const signal = controller.signal;
     const fetchOwner = async () => {
       try {
         setShouldShow(false);
-        // Fetch all data in parallel, including confirmation setting
         const [ownerData, currentUser, allUsers, localOwnersIds, confirmSetting] = await Promise.all([
             getGameOwner(appId),
             getCurrentUser(),
@@ -266,7 +267,6 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
         
         setShowConfirmation(confirmSetting !== false);
 
-        // Identify License Owner
         let licenseOwnerDisplayName = "Unknown";
         let isCurrentUser = false;
         let foundOwnerId: string | null = null;
@@ -276,12 +276,10 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
             const id = ownerData.last_owner;
             foundOwnerId = id;
             
-            // Is it the current user?
             if (currentUser && id === currentUser.steamid) {
                 licenseOwnerDisplayName = "You";
                 isCurrentUser = true;
             } else {
-                // Is it a known local user?
                 const localUser = allUsers.find(u => u.steamid === id);
                 if (localUser) {
                     licenseOwnerDisplayName = localUser.personaName;
@@ -289,9 +287,9 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
                 } else {
                     licenseOwnerDisplayName = id;
                     
-                    // Attempt to fetch display name from Steam community (non-blocking, best-effort)
                     fetchNoCors(`https://steamcommunity.com/profiles/${id}/?xml=1`)
                         .then(async res => {
+                            if (signal.aborted) return;
                             if (res.ok) {
                                 const text = await res.text();
                                 const nameMatch = text.match(/<steamID><!\[CDATA\[(.*?)\]\]><\/steamID>/) || text.match(/<steamID>(.*?)<\/steamID>/);
@@ -301,20 +299,14 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
                                 }
                             }
                         })
-                        .catch(() => {
-                            // Silently ignore - this is a best-effort enhancement
-                        });
+                        .catch(() => {});
                 }
             }
         }
         
-        if (isCurrentUser) {
-            return;
-        }
+        if (isCurrentUser) return;
 
-        if (licenseOwnerDisplayName === "Unknown") {
-            return;
-        }
+        if (licenseOwnerDisplayName === "Unknown") return;
 
         setOwnerName(licenseOwnerDisplayName);
 
@@ -338,9 +330,7 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
             }
         }
 
-        if (currentUserCanPlay) {
-            return;
-        }
+        if (currentUserCanPlay) return;
         setLocalPlayers(playerNames);
         
         if (firstLocalPlayer) {
@@ -363,11 +353,11 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
         setShouldShow(true);
 
       } catch (e) {
-        console.error("[MultiUser] Error fetching owner for label:", e);
         setShouldShow(false);
       }
     };
     fetchOwner();
+    return () => controller.abort();
   }, [appId]);
 
   const handleOwnerClick = () => {
@@ -421,9 +411,7 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
       );
   };
 
-  if (!shouldShow) {
-      return null;
-  }
+  if (!shouldShow) return null;
 
   // Full-width row with button and info text
   if (isSwitching) {
@@ -436,7 +424,8 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
         padding: "14px 12px",
         backgroundColor: "#23262e",
         borderRadius: "4px",
-        marginBottom: "8px"
+        marginBottom: "8px",
+        transition: "opacity 0.2s ease-in"
       }}>
         <FaSyncAlt size={16} style={{ animation: "spin 1s linear infinite" }} />
         <span style={{ fontSize: "14px", fontWeight: "500" }}>
@@ -454,7 +443,8 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
       padding: "10px 12px",
       backgroundColor: "#23262e",
       borderRadius: "4px",
-      marginBottom: "8px"
+      marginBottom: "8px",
+      transition: "opacity 0.2s ease-in"
     }}>
       {/* Switch & Play Button */}
       {targetId && (
@@ -517,74 +507,89 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
   );
 };
 
+const wrappedTypeCache = new WeakMap<object, object>();
+
+const injectOwnerLabel = (ret2: ReactElement, appIdStr: string) => {
+    const ret2Props = ret2.props as { children?: Array<{ props?: { children?: { props?: { children?: ReactElement[] } } } }> };
+    const componentToSplice = ret2Props.children?.[1]?.props?.children?.props?.children;
+    
+    if (!componentToSplice || !Array.isArray(componentToSplice)) return ret2;
+    
+    const spliceIndex = componentToSplice?.findIndex(
+        (child: any) => child?.props?.childFocusDisabled !== undefined && child?.props?.children?.props?.overview !== undefined
+    );
+    
+    const existingIndex = componentToSplice?.findIndex((child: any) =>
+        child?.type === OwnerLabel || child?.props?._source === "decky-multi-user"
+    );
+
+    const component = <OwnerLabel key={appIdStr} appId={appIdStr} _source="decky-multi-user" />;
+
+    if (existingIndex !== -1) {
+        const existing = componentToSplice[existingIndex] as any;
+        if (existing?.key === appIdStr) return ret2;
+        componentToSplice[existingIndex] = component;
+    } else if (spliceIndex > -1) {
+        componentToSplice.splice(Math.max(0, spliceIndex), 0, component);
+    } else {
+        if (componentToSplice && Array.isArray(componentToSplice)) {
+            componentToSplice.unshift(component);
+        }
+    }
+    return ret2;
+};
+
 const patchAppPage = () => {
     if (!routerHook) {
-        console.error("[MultiUser] Router hook is not available!");
         return undefined;
     }
     
-    // Patch Library Page
     return routerHook.addPatch(
         '/library/app/:appid',
         (props: { path: string; children: ReactElement }) => {
+            let renderAppId: string | null = null;
+
             afterPatch(
                 props.children.props,
                 'renderFunc',
                 (_: Record<string, unknown>[], ret1: ReactElement) => {
-                     // Extract AppID - cast to any to access dynamic Steam UI props
                      const ret1Props = ret1.props as { children?: { props?: { overview?: { appid?: string | number } } } };
                      const overview = ret1Props.children?.props?.overview;
                      const appId = overview?.appid;
                      if (!appId) return ret1;
 
-                     wrapReactType((ret1.props as { children: ReactElement }).children);
-                     afterPatch(
-                        ((ret1.props as { children: { type: unknown } }).children).type,
-                        'type',
-                        (_1: Record<string, unknown>[], ret2: ReactElement) => {
-                            // Cast to any for dynamic Steam UI component structure
-                            const ret2Props = ret2.props as { children?: Array<{ props?: { children?: { props?: { children?: ReactElement[] } } } }> };
-                            const componentToSplice = ret2Props.children?.[1]?.props?.children?.props?.children;
-                            
-                            if (!componentToSplice || !Array.isArray(componentToSplice)) {
-                                return ret2;
-                            }
-                            
-                            const spliceIndex = componentToSplice?.findIndex(
-                                // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                                (child: any) => {
-                                    return (
-                                        child?.props?.childFocusDisabled !== undefined &&
-                                        child?.props?.children?.props?.overview !== undefined
-                                    );
-                                }
-                            );
-                            
+                     renderAppId = appId.toString();
 
-                            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-                            const existingIndex = componentToSplice?.findIndex((child: any) => {
-                                return child?.type === OwnerLabel || child?.props?._source === "decky-multi-user"; 
-                            });
+                     const childrenEl = (ret1.props as { children: ReactElement }).children;
+                     const origType = childrenEl.type;
 
-                            const component = <OwnerLabel key={appId} appId={appId.toString()} _source="decky-multi-user" />;
-
-                            if (existingIndex !== -1) {
-                                componentToSplice[existingIndex] = component;
-                            } else if (spliceIndex > -1) {
-                                componentToSplice.splice(
-                                    Math.max(0, spliceIndex),
-                                    0,
-                                    component
-                                );
-                            } else {
-                                console.warn("[MultiUser] Could not find splice index. Attempting fallback unshift.");
-                                if (componentToSplice && Array.isArray(componentToSplice)) {
-                                     componentToSplice.unshift(component);
-                                }
-                            }
-                            return ret2;
-                        }
-                     );
+                     if (typeof origType === 'object' && origType !== null) {
+                         let wrappedType = wrappedTypeCache.get(origType);
+                         if (!wrappedType) {
+                             wrapReactType(childrenEl);
+                             wrappedType = childrenEl.type;
+                             wrappedTypeCache.set(origType, wrappedType);
+                             
+                             afterPatch(
+                                 wrappedType,
+                                 'type',
+                                 (_1: Record<string, unknown>[], ret2: ReactElement) => {
+                                     return injectOwnerLabel(ret2, renderAppId!);
+                                 }
+                             );
+                         } else {
+                             childrenEl.type = wrappedType;
+                         }
+                     } else {
+                         wrapReactType(childrenEl);
+                         afterPatch(
+                             childrenEl.type,
+                             'type',
+                             (_1: Record<string, unknown>[], ret2: ReactElement) => {
+                                 return injectOwnerLabel(ret2, renderAppId!);
+                             }
+                         );
+                     }
                      return ret1;
                 }
             );
