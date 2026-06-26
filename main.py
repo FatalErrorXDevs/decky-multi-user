@@ -3,6 +3,8 @@ import json
 import os
 import platform
 import tempfile
+if platform.system()=="Windows":
+    import winreg
 try:
     import pwd
 except ImportError:
@@ -63,12 +65,13 @@ else:
 
 
 class Plugin:
-    # Paths are determined dynamically based on the Steam user
-    STEAM_CONFIG_PATH = STEAM_HOME / ".local/share/Steam/config"
+    # Paths are determined dynamically based on the steam user on linux, registry value on Windows
+    STEAM_CONFIG_PATH = STEAM_HOME / "config" if IS_WINDOWS else STEAM_HOME / ".local/share/Steam/config"
     LOGINUSERS_VDF = STEAM_CONFIG_PATH / "loginusers.vdf"
-    USERDATA_PATH = STEAM_HOME / ".local/share/Steam/userdata"
-    # Registry file contains AutoLoginUser - key for account switching!
+    USERDATA_PATH = STEAM_HOME / "userdata" if IS_WINDOWS else STEAM_HOME / ".local/share/Steam/userdata"
+    # Registry file contains AutoLoginUser - key for account switching on linux!
     REGISTRY_VDF = STEAM_HOME / ".steam/registry.vdf"
+
     # File to store pending game launch after account switch
     PENDING_LAUNCH_FILE = Path(tempfile.gettempdir())/"decky_multiuser_pending_launch.json"
     
@@ -87,10 +90,19 @@ class Plugin:
         settings.setSetting(key, value)
         settings.commit()
         return True
+    
+    def _set_windows_autologin(self, username):
+        key=winreg.OpenKey(winreg.HKEY_CURRENT_USER,r"Software\\Valve\\Steam",0,winreg.KEY_SET_VALUE)
+        winreg.SetValueEx(key,"AutoLoginUser",0,winreg.REG_SZ,username)
+        try: winreg.SetValueEx(key,"RememberPassword",0,winreg.REG_DWORD,1)
+        except OSError: pass
+        winreg.CloseKey(key)
+    
 
     async def _check_pending_launch(self):
         """Check if there's a pending game launch after account switch"""
         try:
+            decky.logger.info("atempting to load pending launch")
             if not self.PENDING_LAUNCH_FILE.exists():
                 return
             
@@ -103,15 +115,24 @@ class Plugin:
             if not appid:
                 return
             
+            decky.logger.info("loaded pending appid:" + appid)
+            
             delay = data.get('delay', 3)
             await asyncio.sleep(delay)
             
-            result = subprocess.run(
-                [ 'cmd','/c','start','',f'steam://rungameid/{appid}'] if IS_WINDOWS else ['sudo','-u',STEAM_USER,'steam',f'steam://rungameid/{appid}'],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
+            
+            cmd=[str(STEAM_HOME/'steam.exe')] if IS_WINDOWS else ['steam']
+            
+            
+            if IS_WINDOWS:
+                os.startfile(f"steam://rungameid/{appid}")
+            else:
+                result = subprocess.run(
+                    ['sudo','-u',STEAM_USER,'steam',f'steam://rungameid/{appid}'],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
             decky.logger.info(f"Game {appid} launch triggered")
             
         except Exception as e:
@@ -305,7 +326,10 @@ class Plugin:
         try:
             decky.logger.info(f"Switching to user: {username} (steamid: {steamid})")
             
-            if self.REGISTRY_VDF.exists():
+            if IS_WINDOWS:
+                decky.logger.info(f"Modifying windows registry")
+                self._set_windows_autologin(username)
+            elif self.REGISTRY_VDF.exists():
                 decky.logger.info(f"Modifying registry.vdf at {self.REGISTRY_VDF}")
                 with open(self.REGISTRY_VDF, 'r', encoding='utf-8') as f:
                     registry_content = f.read()
@@ -330,10 +354,10 @@ class Plugin:
                     with open(self.REGISTRY_VDF, 'w', encoding='utf-8') as f:
                         f.write(registry_content)
                     if not IS_WINDOWS:
-                    try:
-                        shutil.chown(self.REGISTRY_VDF, user=STEAM_USER, group=STEAM_USER)
-                    except Exception:
-                        pass
+                        try:
+                            shutil.chown(self.REGISTRY_VDF, user=STEAM_USER, group=STEAM_USER)
+                        except Exception:
+                            pass
                 else:
                     decky.logger.warn("No changes made to registry.vdf - pattern not found")
             else:
