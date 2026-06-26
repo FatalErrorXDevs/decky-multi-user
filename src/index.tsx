@@ -507,7 +507,9 @@ const OwnerLabel = ({ appId }: { appId: string; [key: string]: unknown }) => {
   );
 };
 
-const wrappedTypeCache = new WeakMap<object, object>();
+type ReactType = ReactElement["type"];
+
+const wrappedTypeCache = new WeakMap<object, ReactType>();
 
 const injectOwnerLabel = (ret2: ReactElement, appIdStr: string) => {
     const ret2Props = ret2.props as { children?: Array<{ props?: { children?: { props?: { children?: ReactElement[] } } } }> };
