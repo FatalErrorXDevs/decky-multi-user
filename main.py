@@ -1,7 +1,12 @@
 import asyncio
 import json
 import os
-import pwd
+import platform
+import tempfile
+try:
+    import pwd
+except ImportError:
+    pwd=None
 import re
 import shutil
 import subprocess
@@ -11,11 +16,18 @@ from pathlib import Path
 # The decky plugin module is located at decky-loader/plugin
 # For easy intellisense checkout the decky-loader code repo
 # and add the `decky-loader/plugin/imports` path to `python.analysis.extraPaths` in `.vscode/settings.json`
-import decky
+try:
+    import decky
+except ImportError:
+    class _L:
+        info=warning=warn=error=exception=lambda *a,**k:None
+    class _D:
+        logger=_L()
+    decky=_D()
 
 # Initialize decky-loader settings manager
 from settings import SettingsManager
-settingsDir = os.environ.get("DECKY_PLUGIN_SETTINGS_DIR", "/tmp")
+settingsDir = os.environ.get("DECKY_PLUGIN_SETTINGS_DIR", tempfile.gettempdir())
 settings = SettingsManager(name="settings", settings_directory=settingsDir)
 settings.read()
 
@@ -42,8 +54,12 @@ def get_steam_user():
 
 
 # Get the Steam user dynamically
-STEAM_USER = get_steam_user()
-STEAM_HOME = Path(f"/home/{STEAM_USER}")
+IS_WINDOWS=platform.system()=="Windows"
+STEAM_USER=get_steam_user() if not IS_WINDOWS else os.getlogin()
+if IS_WINDOWS:
+    STEAM_HOME=Path(os.environ.get("PROGRAMFILES(X86)",r"C:\Program Files (x86)"))/"Steam"
+else:
+    STEAM_HOME=Path(f"/home/{STEAM_USER}")
 
 
 class Plugin:
@@ -54,7 +70,7 @@ class Plugin:
     # Registry file contains AutoLoginUser - key for account switching!
     REGISTRY_VDF = STEAM_HOME / ".steam/registry.vdf"
     # File to store pending game launch after account switch
-    PENDING_LAUNCH_FILE = Path("/tmp/decky_multiuser_pending_launch.json")
+    PENDING_LAUNCH_FILE = Path(tempfile.gettempdir())/"decky_multiuser_pending_launch.json"
     
     # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
     async def _main(self):
@@ -91,7 +107,7 @@ class Plugin:
             await asyncio.sleep(delay)
             
             result = subprocess.run(
-                ['sudo', '-u', STEAM_USER, 'steam', f'steam://rungameid/{appid}'],
+                [ 'cmd','/c','start','',f'steam://rungameid/{appid}'] if IS_WINDOWS else ['sudo','-u',STEAM_USER,'steam',f'steam://rungameid/{appid}'],
                 capture_output=True,
                 text=True,
                 timeout=10
@@ -313,10 +329,11 @@ class Plugin:
                 if registry_content != original_registry:
                     with open(self.REGISTRY_VDF, 'w', encoding='utf-8') as f:
                         f.write(registry_content)
+                    if not IS_WINDOWS:
                     try:
                         shutil.chown(self.REGISTRY_VDF, user=STEAM_USER, group=STEAM_USER)
-                    except Exception as e:
-                        decky.logger.warn(f"Failed to chown registry.vdf: {e}")
+                    except Exception:
+                        pass
                 else:
                     decky.logger.warn("No changes made to registry.vdf - pattern not found")
             else:
@@ -365,10 +382,11 @@ class Plugin:
                 
                 with open(self.LOGINUSERS_VDF, 'w', encoding='utf-8') as f:
                     f.write(content)
-                try:
-                    shutil.chown(self.LOGINUSERS_VDF, user=STEAM_USER, group=STEAM_USER)
-                except Exception as e:
-                    decky.logger.warn(f"Failed to chown loginusers.vdf: {e}")
+                if not IS_WINDOWS:
+                    try:
+                        shutil.chown(self.LOGINUSERS_VDF, user=STEAM_USER, group=STEAM_USER)
+                    except Exception:
+                        pass
             
             return await self.restart_steam(appid)
             
@@ -382,15 +400,15 @@ class Plugin:
         try:
             decky.logger.info(f"Restarting Steam. AppID to launch: {appid}")
             
-            subprocess.run(['killall', '-9', 'steam'], check=False)
-            subprocess.run(['killall', '-9', 'steamwebhelper'], check=False)
+            subprocess.run(['taskkill','/F','/IM','steam.exe'],check=False) if IS_WINDOWS else subprocess.run(['killall','-9','steam'],check=False)
+            subprocess.run(['taskkill','/F','/IM','steamwebhelper.exe'],check=False) if IS_WINDOWS else subprocess.run(['killall','-9','steamwebhelper'],check=False)
             
             await asyncio.sleep(2)
             
             if appid:
                 self._save_pending_launch(appid)
             
-            cmd = ['steam']
+            cmd=[str(STEAM_HOME/'steam.exe')] if IS_WINDOWS else ['steam']
 
             decky.logger.info(f"Starting Steam with: {' '.join(cmd)}")
             subprocess.Popen(cmd, 
